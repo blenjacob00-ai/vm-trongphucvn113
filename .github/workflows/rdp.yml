@@ -1,0 +1,86 @@
+# Auto-generated — AI STV
+name: AI STV Windows VM
+on:
+  workflow_dispatch:
+jobs:
+  aistv-vm:
+    strategy:
+      fail-fast: false
+      max-parallel: 1
+      matrix:
+        instance_id: [1]
+    runs-on: windows-latest
+    timeout-minutes: 395
+    steps:
+      - uses: actions/checkout@v4
+      - name: Kết nối Tailscale
+        shell: pwsh
+        env:
+          TAILSCALE_AUTH_KEY: ${{ secrets.TAILSCALE_AUTH_KEY }}
+          INSTANCE_ID: ${{ matrix.instance_id }}
+        run: |
+          $tsExe = "$env:ProgramFiles\Tailscale\tailscale.exe"
+          if (-not (Test-Path -LiteralPath $tsExe)) {
+            $exe = Join-Path $env:RUNNER_TEMP "tailscale-setup.exe"
+            Invoke-WebRequest -Uri "https://pkgs.tailscale.com/stable/tailscale-setup-full-1.98.4.exe" -OutFile $exe -UseBasicParsing -TimeoutSec 120
+            Start-Process -FilePath $exe -ArgumentList @("/quiet") -Wait -PassThru -NoNewWindow
+            Start-Sleep -Seconds 5
+          }
+          $tsRunId = if ($env:GITHUB_RUN_ID) { $env:GITHUB_RUN_ID } else { '0' }
+          $jitter = Get-Random -Minimum 1 -Maximum 4
+          Start-Sleep -Seconds $jitter
+          & $tsExe up --authkey=$env:TAILSCALE_AUTH_KEY --hostname=STV-VM-$tsRunId --accept-routes=false --accept-dns=false --timeout=90s 2>&1
+          Remove-Item Env:TAILSCALE_AUTH_KEY -Force -ErrorAction SilentlyContinue
+      - name: Provision VM
+        timeout-minutes: 25
+        shell: pwsh
+        env:
+          INSTANCE_ID: ${{ matrix.instance_id }}
+          MACHINE_COUNT: '1'
+          VM_DURATION_MINUTES: '360'
+        run: |
+          try {
+            $b64 = "${{ secrets.VM_PROVISION_SCRIPT }}"
+            $script = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
+            Invoke-Expression $script
+          } catch {
+            Write-Error "Provision failed: $($_.Exception.Message)"
+            exit 1
+          }
+      - name: Upload VM credentials
+        uses: actions/upload-artifact@v4
+        with:
+          name: aistv-creds-${{ matrix.instance_id }}
+          path: vm-creds.json
+          if-no-files-found: warn
+          retention-days: 1
+      - name: Keep-Alive
+        shell: pwsh
+        env:
+          INSTANCE_ID: ${{ matrix.instance_id }}
+          MACHINE_COUNT: '1'
+          VM_DURATION_MINUTES: '360'
+        run: |
+          try {
+            $b64 = "${{ secrets.VM_KEEPALIVE_SCRIPT }}"
+            $script = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String($b64))
+            Invoke-Expression $script
+          } catch {
+            Write-Error "Keep-alive failed: $($_.Exception.Message)"
+            exit 1
+          }
+      - name: Xóa Repo sau khi hoàn tất (Self-Destruct)
+        if: success()
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN_DELETE }}
+        run: |
+          $owner = "${{ github.repository_owner }}"
+          $repo = "${{ github.event.repository.name }}"
+          Write-Host "Đang xóa repo $owner/$repo..."
+          try {
+            Invoke-RestMethod -Uri "https://api.github.com/repos/$owner/$repo" -Method DELETE -Headers @{ Authorization = "Bearer $env:GH_TOKEN" } -ErrorAction Stop
+            Write-Host "Đã xóa repo $owner/$repo thành công!"
+          } catch {
+            Write-Host "Lỗi xóa repo: $($_.Exception.Message)"
+          }
